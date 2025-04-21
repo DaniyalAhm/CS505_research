@@ -45,7 +45,7 @@ bnb_config = BitsAndBytesConfig(
 model = AutoModelForCausalLM.from_pretrained(
     "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
     quantization_config=bnb_config,
-    device_map={"": 0},       # <-- put the entire model (sharded 4‑bit) on GPU 0
+    device_map="auto",       # <-- put the entire model (sharded 4‑bit) on GPU 0
 )
 
 from peft import prepare_model_for_kbit_training, LoraConfig, get_peft_model
@@ -74,8 +74,8 @@ args = TrainingArguments(
     output_dir="./results",
     save_strategy="epoch",
     learning_rate=2e-5,
-    per_device_train_batch_size=1,     # This is per GPU
-    per_device_eval_batch_size=1,
+    per_device_train_batch_size=2,     # This is per GPU
+    per_device_eval_batch_size=2,
     num_train_epochs=1,
     weight_decay=0.01,
     logging_dir="./logs",
