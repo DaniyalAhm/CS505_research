@@ -2,9 +2,9 @@
 
 import os
 import pathlib
+
 # Set the huggingface cache to a location
 # in the class project.
-
 
 user = 'daniyala'
 cache_dir = os.path.join('/projectnb/cs505aw/students',
@@ -32,66 +32,86 @@ from transformers import AutoTokenizer, AutoModelForCausalLM
 from transformers import AutoModelForCausalLM, BitsAndBytesConfig
 from peft import prepare_model_for_kbit_training, LoraConfig, get_peft_model
 
+from transformers import DataCollatorWithPadding
 
+# train_ddp.py
 
-
-bnb_config = BitsAndBytesConfig(
-    load_in_4bit=True,
-    bnb_4bit_quant_type="nf4",
-    bnb_4bit_compute_dtype=torch.float16,
-    bnb_4bit_use_double_quant=True,
+import os
+import torch
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data import DataLoader
+from torch.utils.data.distributed import DistributedSampler
+from transformers import (
+    AutoTokenizer,
+    AutoModelForCausalLM,
+    BitsAndBytesConfig,
+    DataCollatorWithPadding,
 )
 
-model = AutoModelForCausalLM.from_pretrained(
-    "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
-    quantization_config=bnb_config,
-    device_map="auto",       # <-- put the entire model (sharded 4‑bit) on GPU 0
-)
+def get_dataset(tokenizer):
+    from datasets import load_dataset
+    ds = load_dataset("open-r1/OpenR1-Math-220k", split="train[:4000]")
+    def tok(ex):
+        t = tokenizer(ex["problem"], ex["solution"],
+                      padding="max_length", truncation=True)
+        t["labels"] = t["input_ids"].copy()
+        return t
+    ds = ds.map(tok, batched=True)
+    ds.set_format(type="torch",
+                  columns=["input_ids","attention_mask","labels"])
+    return ds.train_test_split(test_size=0.1, seed=42)["train"]
 
-from peft import prepare_model_for_kbit_training, LoraConfig, get_peft_model
-model = prepare_model_for_kbit_training(model)
-lora_cfg = LoraConfig(r=8, target_modules=["q_proj","v_proj"], lora_dropout=0.05, bias="none", task_type="CAUSAL_LM")
-model = get_peft_model(model, lora_cfg)
+def main():
+    dist.init_process_group(backend="nccl")
+    rank = int(os.environ["LOCAL_RANK"])
+    torch.cuda.set_device(rank)
 
+    tokenizer = AutoTokenizer.from_pretrained("deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B")
+    collator = DataCollatorWithPadding(tokenizer)
 
-dataset = load_dataset("open-r1/OpenR1-Math-220k",split="train[:4000]")
+    bnb = BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_quant_type="nf4",
+        bnb_4bit_compute_dtype=torch.float16,
+        bnb_4bit_use_double_quant=True,
+    )
+    model = AutoModelForCausalLM.from_pretrained(
+        "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
+        quantization_config=bnb,
+        device_map='cpu'
+        
+    )
+    # apply LoRA
+    from peft import prepare_model_for_kbit_training, LoraConfig, get_peft_model
+    model = prepare_model_for_kbit_training(model)
+    model = get_peft_model(
+        model,
+        LoraConfig(r=8, target_modules=["q_proj","v_proj"], lora_dropout=0.05, bias="none", task_type="CAUSAL_LM")
+    )
+    model.gradient_checkpointing_enable()
+    model.to(rank)
+    model = DDP(model, device_ids=[rank], broadcast_buffers=False)
+    train_ds = get_dataset(tokenizer)
+    sampler  = DistributedSampler(train_ds)
+    loader   = DataLoader(train_ds, sampler=sampler,
+                          batch_size=1, collate_fn=collator,
+                          num_workers=1, pin_memory=True)
 
-tokenizer = AutoTokenizer.from_pretrained("deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B")
+    optim = torch.optim.AdamW(model.parameters(), lr=2e-5, weight_decay=0.01)
 
-def tokenize(examples):
-    tokens = tokenizer(examples["problem"], examples['solution'], padding="max_length", truncation=True)
-    tokens["labels"] = tokens["input_ids"].copy()
-    return tokens
+    for epoch in range(1):
+        sampler.set_epoch(epoch)
+        for batch in loader:
+            batch = {k: v.to(rank) for k, v in batch.items()}
+            loss = model(**batch).loss
+            loss.backward()
+            optim.step()
+            optim.zero_grad()
+        if dist.get_rank() == 0:
+            model.module.save_pretrained(f"./checkpoint-epoch{epoch}")
 
-dataset = dataset.map(tokenize, batched=True)
-#print(dataset)
-split = dataset.train_test_split(test_size=0.1, seed=42)
-train_raw, test_raw = split["train"], split["test"]
-train_ds = train_raw.map(tokenize, batched=True)
-test_ds  = test_raw.map(tokenize, batched=True)
+    dist.destroy_process_group()
 
-args = TrainingArguments(
-    output_dir="./results",
-    save_strategy="epoch",
-    learning_rate=2e-5,
-    per_device_train_batch_size=2,     # This is per GPU
-    per_device_eval_batch_size=2,
-    num_train_epochs=1,
-    weight_decay=0.01,
-    logging_dir="./logs",
-    fp16=True,                         # Mixed precision for memory savings
-    gradient_accumulation_steps=1,
-    dataloader_num_workers=4,
-)
-
-
-
-trainer = Trainer(
-    model=model,
-    args=args,
-    train_dataset=train_ds,
-    eval_dataset=test_ds,
-    tokenizer=tokenizer,
-)
-
-trainer.train()
+if __name__=="__main__":
+    main()
