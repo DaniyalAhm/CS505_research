@@ -51,7 +51,8 @@ from transformers import (
 )
 
 ### TRAINED OPen221k on max lenth 512 and 20000 samples
-### Trained Code parent on 10000 samples and length 1024, 3 epochs
+### Trained Code parent on 10000 samples and length 1024, 3 epochs with 10000 samples
+### Trained Code Parrot GIthub on 10000 samples with max length of 1024
 
 
 def get_dataset(tokenizer):
