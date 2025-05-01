@@ -54,27 +54,15 @@ def load_model(base_name: str, adapter_dir: str):
 import re
 
 def extract_answer(full_text: str) -> str:
-    """
-    Extract the model’s final answer token, which may appear as:
-      1) XML tag: <Answer>5</Answer> (possibly with an extra quote)
-      2) "Answer:" marker
-      3) Last non-empty line
-
-    Returns the first token found, stripped of any trailing quotes or punctuation.
-    """
-    # 1) Look for <Answer>...</Answer>
     tag_match = re.search(r"<Answer>\s*([^<]+?)\s*</Answer>", full_text, re.IGNORECASE)
     if tag_match:
-        # strip any trailing quotes or dots
         return tag_match.group(1).strip().rstrip('."\'')
     
-    # 2) Look for “Answer:” marker (case-insensitive)
     parts = re.split(r"(?i)Answer\s*:\s*", full_text, maxsplit=1)
     if len(parts) > 1:
         after = parts[1].strip()
         return after.split()[0].rstrip('."\'')
     
-    # 3) Fallback: first token on the last non-empty line
     lines = [line.strip() for line in full_text.strip().splitlines() if line.strip()]
     if lines:
         return lines[-1].split()[0].rstrip('."\'')
@@ -83,21 +71,16 @@ def extract_answer(full_text: str) -> str:
 
 def main():
     BASE    = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
-    ADAPTER = "../checkpoint-epoch0"  # adjust to your adapter path
-
-    print("Loading model…")
+    ADAPTER = "../checkpoint-epoch0"     print("Loading model…")
     tokenizer, model, device = load_model(BASE, ADAPTER)
     print(f"Model loaded on {device}.")
 
-    # 1) load the AIME dataset split
     ds = load_dataset("HuggingFaceH4/MATH-500")
     split = ds.get("test" )
 
-    # 2) prepare pairs (problem, "") exactly as in training
     problems  = [ex["problem"] for ex in split]
     solutions = ["<Answer>"] * len(problems)
 
-    # 3) batch‐tokenize into tensors
     enc = tokenizer(
         problems,
         solutions,
@@ -107,7 +90,6 @@ def main():
         max_length=1024,
     )
 
-    # 4) wrap in TensorDataset & DataLoader
     dataset = TensorDataset(enc["input_ids"], enc["attention_mask"])
     loader  = DataLoader(dataset, batch_size=8, shuffle=False, num_workers=2)
 
@@ -118,7 +100,6 @@ def main():
             input_ids      = input_ids.to(device)
             attention_mask = attention_mask.to(device)
 
-            # 5) generate just the downstream tokens
             outputs = model.generate(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
@@ -128,13 +109,10 @@ def main():
                 eos_token_id=tokenizer.eos_token_id,
             )
 
-            # 6) decode only the *generated* part:
-            #    slice off the prefix length
             prefix_len = input_ids.shape[1]
             gens = [out[prefix_len:] for out in outputs]
             texts = tokenizer.batch_decode(gens, skip_special_tokens=True)
 
-            # 7) map back to original examples
             start = batch_idx * loader.batch_size
             for i, full in enumerate(texts):
                 idx          = start + i
@@ -150,7 +128,6 @@ def main():
                     "correct":      correct
                 })
 
-    # 8) aggregate & save
     df       = pd.DataFrame(records)
     accuracy = df["correct"].mean()
     print(f"AIME accuracy: {accuracy:.2%}")

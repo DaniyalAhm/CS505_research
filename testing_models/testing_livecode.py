@@ -1,12 +1,4 @@
 #!/usr/bin/env python3
-"""
-evaluate_livebench_hf.py
-
-Run pass@1 evaluation of a LoRA-tuned 8-bit Qwen-1.5B model on the
-HuggingFace LiveBench coding dataset (“livebench/coding”).
-
-Everything is configured via the constants below.
-"""
 import os
 import pathlib
 from tqdm import tqdm
@@ -27,21 +19,15 @@ from datasets import load_dataset
 from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
 from peft       import PeftModel
 
-# ─── CONFIGURE EVERYTHING HERE ───────────────────────────────────────────────
 
-# Either a local folder or HF repo ID:
 BASE_MODEL    = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
 
-# Path to your LoRA adapter folder:
 ADAPTER_DIR   = "../CODE_PARROT_RESULTS"
 
-# How many tokens to generate per prompt:
 MAX_NEW_TOKENS = 128
 
-# If True, run on CPU even if a GPU is available:
 FORCE_CPU      = False
 
-# ─── END OF CONFIG ──────────────────────────────────────────────────────────
 
 def load_lora_model(base_name: str, adapter_dir: str, device: torch.device):
     tokenizer = AutoTokenizer.from_pretrained(base_name)
@@ -85,9 +71,8 @@ def main():
 
     passes = 0
     for ex in tqdm(split, desc="LiveBench Eval"):
-        prompt = ex["question_content"]   # if your dataset uses a different key, rename it
-        tests  = ex["private_test_cases"]    # likewise adjust if needed
-
+        prompt = ex["question_content"]   
+        tests  = ex["private_test_cases"]   
         inputs = tokenizer(prompt, return_tensors="pt", padding=True, truncation=True)
         inputs = {k: v.to(device) for k, v in inputs.items()}
         with torch.inference_mode():
