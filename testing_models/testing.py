@@ -1,6 +1,18 @@
 #!/usr/bin/env python3
 # evaluation_aime_batch_fixed.py
 
+
+import os
+import pathlib
+from tqdm import tqdm
+
+# set cache dir …
+user     = 'daniyala'
+cache_dir= os.path.join('/projectnb/cs505aw/students', user, '.hf_cache')
+pathlib.Path(cache_dir).mkdir(parents=True, exist_ok=True)
+os.environ['HF_HOME'] = cache_dir
+
+
 import re
 import os
 import pandas as pd
@@ -10,6 +22,9 @@ from datasets import load_dataset
 from torch.utils.data import TensorDataset, DataLoader
 from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
 from peft import PeftModel
+
+
+torch.cuda.empty_cache()
 
 def load_model(base_name: str, adapter_dir: str):
     tokenizer = AutoTokenizer.from_pretrained(base_name)
@@ -36,28 +51,51 @@ def load_model(base_name: str, adapter_dir: str):
     )
     model.eval()
     return tokenizer, model, device
+import re
 
 def extract_answer(full_text: str) -> str:
-    # take the very first whitespace-separated token of the continuation
-    # assume the solution begins immediately after the input prompt
-    tok = full_text.strip().split()
-    return tok[0].rstrip(".") if tok else ""
+    """
+    Extract the model’s final answer token, which may appear as:
+      1) XML tag: <Answer>5</Answer> (possibly with an extra quote)
+      2) "Answer:" marker
+      3) Last non-empty line
+
+    Returns the first token found, stripped of any trailing quotes or punctuation.
+    """
+    # 1) Look for <Answer>...</Answer>
+    tag_match = re.search(r"<Answer>\s*([^<]+?)\s*</Answer>", full_text, re.IGNORECASE)
+    if tag_match:
+        # strip any trailing quotes or dots
+        return tag_match.group(1).strip().rstrip('."\'')
+    
+    # 2) Look for “Answer:” marker (case-insensitive)
+    parts = re.split(r"(?i)Answer\s*:\s*", full_text, maxsplit=1)
+    if len(parts) > 1:
+        after = parts[1].strip()
+        return after.split()[0].rstrip('."\'')
+    
+    # 3) Fallback: first token on the last non-empty line
+    lines = [line.strip() for line in full_text.strip().splitlines() if line.strip()]
+    if lines:
+        return lines[-1].split()[0].rstrip('."\'')
+    
+    return ""
 
 def main():
     BASE    = "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B"
-    ADAPTER = "./open220k"  # adjust to your adapter path
+    ADAPTER = "../checkpoint-epoch0"  # adjust to your adapter path
 
     print("Loading model…")
     tokenizer, model, device = load_model(BASE, ADAPTER)
     print(f"Model loaded on {device}.")
 
     # 1) load the AIME dataset split
-    ds = load_dataset("Maxwell-Jia/AIME_2024")
-    split = ds.get("test", ds.get("validation", ds["train"]))
+    ds = load_dataset("HuggingFaceH4/MATH-500")
+    split = ds.get("test" )
 
     # 2) prepare pairs (problem, "") exactly as in training
-    problems  = [ex["Problem"] for ex in split]
-    solutions = [""] * len(problems)
+    problems  = [ex["problem"] for ex in split]
+    solutions = ["<Answer>"] * len(problems)
 
     # 3) batch‐tokenize into tensors
     enc = tokenizer(
@@ -66,7 +104,7 @@ def main():
         return_tensors="pt",
         padding=True,
         truncation=True,
-        max_length=128,
+        max_length=1024,
     )
 
     # 4) wrap in TensorDataset & DataLoader
@@ -84,7 +122,7 @@ def main():
             outputs = model.generate(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
-                max_new_tokens=16,
+                max_new_tokens=1024,
                 do_sample=False,
                 pad_token_id=tokenizer.eos_token_id,
                 eos_token_id=tokenizer.eos_token_id,
@@ -100,8 +138,8 @@ def main():
             start = batch_idx * loader.batch_size
             for i, full in enumerate(texts):
                 idx          = start + i
-                problem_text = split[idx]["Problem"]
-                true_ans     = str(split[idx]["Answer"])
+                problem_text = split[idx]["problem"]
+                true_ans     = str(split[idx]["answer"])
 
                 pred    = extract_answer(full)
                 correct = (pred == true_ans)
@@ -116,7 +154,7 @@ def main():
     df       = pd.DataFrame(records)
     accuracy = df["correct"].mean()
     print(f"AIME accuracy: {accuracy:.2%}")
-    df.to_csv("aime_results.csv", index=False)
+    df.to_csv("math500_results.csv", index=False)
     print("Results saved to aime_results.csv")
 
 if __name__ == "__main__":
